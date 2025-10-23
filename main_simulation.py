@@ -1,122 +1,170 @@
-import pybullet as p
-import time
-import numpy as np
-from mpc_optimizer import MPCOptimizer
 import matplotlib.pyplot as plt
+from matplotlib.lines import Line2D
+from matplotlib.patches import Circle as LegendCircle
+import numpy as np
+import time
+from mpc_optimizer import MPCOptimizer, PerceptionModule  
+from reference_planner import ReferencePlanner
 
-def setup_simulation():
-    """Initializes PyBullet and creates the simulation environment."""
-    p.connect(p.GUI)
-    p.configureDebugVisualizer(p.COV_ENABLE_GUI, 0)
-    p.setGravity(0, 0, 0) # We handle all physics, so disable gravity
-    
-    # Create the UAV object (a simple sphere)
-    uav_visual_shape_id = p.createVisualShape(shapeType=p.GEOM_SPHERE, radius=0.1, rgbaColor=[0.1, 0.2, 0.8, 1])
-    # Set mass to 0 to make it a purely kinematic object
-    uav_id = p.createMultiBody(baseMass=0, baseVisualShapeIndex=uav_visual_shape_id, basePosition=[0,0,1])
-    
-    # Create obstacle objects
-    obstacle_positions = [[1.5, 0.5, 1.0], [3.0, 1.5, 1.0]]
-    for pos in obstacle_positions:
-        obs_visual_shape_id = p.createVisualShape(shapeType=p.GEOM_CYLINDER, radius=0.6, length=2, rgbaColor=[1, 0.2, 0.2, 0.8])
-        p.createMultiBody(baseMass=0, baseVisualShapeIndex=obs_visual_shape_id, basePosition=pos)
-    
-    print("PyBullet visualizer environment created")
-    return uav_id, obstacle_positions
+class RealTimeVisualizer:
+    def __init__(self, x_lim, y_lim, goal_position, all_world_obstacles, mpc_params, sensor_range):
+        plt.ion()
+        self.fig, self.ax = plt.subplots(figsize=(10, 8))
+        self.x_lim = x_lim
+        self.y_lim = y_lim
+        
+        # Static
+        goal_handle = self.ax.plot(goal_position[0], goal_position[1], 'g*', markersize=15)[0]
+        
+        safety_radius = mpc_params['safety_distance']
+        obstacle_handles = []
+        for obs in all_world_obstacles:
+            circle = plt.Circle((obs[0], obs[1]), safety_radius, color='r', alpha=0.3)
+            self.ax.add_artist(circle)
+            obs_handle = self.ax.plot(obs[0], obs[1], 'rx', markersize=10)[0]
+            obstacle_handles.append(obs_handle)
 
-def plot_results(global_ref_path, path_history, obstacles, mpc_params, goal_position):
-    """Plots the final executed path."""
-    fig, ax = plt.subplots(figsize=(10, 8))
-    path_history = np.array(path_history)
+        # Dynamic
+        self.executed_path_plot, = self.ax.plot([], [], 'b-o', markersize=4)
+        self.mpc_plan_plot, = self.ax.plot([], [], 'm--')
+        self.ref_path_plot, = self.ax.plot([], [], 'c:')
+        self.sensor_circle = plt.Circle((0,0), sensor_range, color='gray', fill=False, ls=':')
+        self.ax.add_artist(self.sensor_circle)
 
-    ax.plot(global_ref_path[:, 0], global_ref_path[:, 1], 'g--', label='Reference Path')
-    ax.plot(path_history[:, 0], path_history[:, 1], 'b-o', markersize=4, label='Executed Path')
-    ax.plot(path_history[0, 0], path_history[0, 1], 'ks', markersize=10, label='Start')
-    ax.plot(goal_position[0], goal_position[1], 'g*', markersize=15, label='Goal')
-    
-    safety_radius = mpc_params['safety_distance']
-    obs = obstacles[0]
-    circle = plt.Circle((obs[0], obs[1]), safety_radius, color='r', alpha=0.3)
-    ax.add_artist(circle)
-    ax.plot(obs[0], obs[1], 'rx', markersize=10, label='Obstacle')
-    for obs in obstacles[1:]:
-        circle = plt.Circle((obs[0], obs[1]), safety_radius, color='r', alpha=0.3)
-        ax.add_artist(circle)
-        ax.plot(obs[0], obs[1], 'rx', markersize=10)
+        safety_radius_proxy = LegendCircle((0,0), radius=0.1, color='r', alpha=0.3)
+        sensor_range_proxy = Line2D([0], [0], linestyle=':', color='gray')
+        
+        # Define the exact handles and labels you want
+        legend_handles = [goal_handle, obstacle_handles[0], self.executed_path_plot,
+                          self.mpc_plan_plot, self.ref_path_plot, sensor_range_proxy, safety_radius_proxy]
+        
+        legend_labels = ['Goal', 'Obstacle', 'Executed Path', 'Current MPC Plan',
+                          'Global Reference (A*)', 'Sensor Range', 'Safety Radius']
+        
+        self.ax.legend(handles=legend_handles, labels=legend_labels)
 
-    ax.set_xlabel("X position (m)")
-    ax.set_ylabel("Y position (m)")
-    ax.set_title("MPC Simulation Results")
-    ax.legend()
-    ax.grid(True)
-    ax.axis('equal')
-    plt.show()
+        self.ax.set_xlabel("X position (m)")
+        self.ax.set_ylabel("Y position (m)")
+        self.ax.set_title("Simulation of UAV Motion Planning using MPC")
+        self.ax.set_xlim(self.x_lim)
+        self.ax.set_ylim(self.y_lim)
+        self.ax.grid(True)
+        self.ax.set_aspect('equal', adjustable='box')
 
-def run_simulation():
-    # Initialization 
-    uav_id, obstacle_positions = setup_simulation()
-    
-    model_params = {'dt': 0.1, 'D_max': np.diag([0.1, 0.1, 0.1])}
-    mpc_params = { 'P': 20, 'v_max': 2.0, 'a_max': 3.0, 'j_max': 2.0, 'safety_distance': 0.6 }
-    cost_weights = { 'wt': 5.0, 'ws': 1.0, 'wc': 10000.0, 'wj': 0.5, 'alpha': 50.0, 'ref_speed': 1.0 }
-    
+    def update(self, uav_pos, executed_path, mpc_plan, ref_path):
+        """ Updates the plot with new data """
+        executed_path = np.array(executed_path)
+        self.executed_path_plot.set_data(executed_path[:, 0], executed_path[:, 1])
+        self.mpc_plan_plot.set_data(mpc_plan[:, 0], mpc_plan[:, 1])
+        self.ref_path_plot.set_data(ref_path[:, 0], ref_path[:, 1])
+        
+        self.sensor_circle.center = (uav_pos[0], uav_pos[1])
+        
+        self.fig.canvas.draw()
+        plt.pause(0.01)
+
+def run_simulation_matplotlib():
+    print("--- Running MPC Simulation with Visualizer ---")
+
+    # Parameters
+    model_params = {'dt': 0.1, 'D_max': np.diag([0.5, 0.5, 0.5])}
+    mpc_params = { 'P': 20, 'v_max': 2.0, 'a_max': 9.81, 'j_max': 1.0, 'safety_distance': 0.6 }
+    cost_weights = { 'wt': 100.0, 'ws': 1.0, 'wc': 10000.0, 'wj': 0.5, 'alpha': 50.0, 'ref_speed': 1.0 }
+    sensor_range = 1.5  # Sensor range in meters
+
     optimizer = MPCOptimizer(model_params, mpc_params, cost_weights)
+    perception = PerceptionModule(sensor_range=sensor_range)
+
+    grid_params = {
+        'width': 100,      # cells
+        'height': 50,      # cells
+        'resolution': 0.1, # meters/cell
+        'origin_x': -1.0,  # world coordinate of grid's bottom-left corner
+        'origin_y': -2.5,
+    }
+    ref_planner = ReferencePlanner(grid_params)
     
-    # State and Goal Setup
+    # Scenario Setup (Two Obstacles)
     current_state = np.array([0, 0, 1, 0, 0, 0, 0, 0, 0])
-    goal_position = np.array([4.0, 2.0, 1.0])
+    goal_position = np.array([10.0, 4, 1.0])
+
+    # For plot
+    all_world_obstacles = [np.array([4.0, 1.5, 1.0]), np.array([8.0, 3.5, 1.0])]
+    
     path_history = [current_state[0:3]]
+    
+    # Visualizer Setup
+    x_lim = [-1, goal_position[0] + 1]
+    y_lim = [-2, goal_position[1] + 2]
+    visualizer = RealTimeVisualizer(x_lim=x_lim, y_lim=y_lim, 
+                                    goal_position=goal_position, 
+                                    all_world_obstacles=all_world_obstacles,
+                                    mpc_params=mpc_params,
+                                    sensor_range=sensor_range)
 
-    num_ref_points = int(np.linalg.norm(goal_position - current_state[0:3]) / (cost_weights['ref_speed'] * model_params['dt']))
-    global_ref_path = np.zeros((num_ref_points, 3))
-    direction_vector = goal_position - current_state[0:3]
-    direction_norm = direction_vector / np.linalg.norm(direction_vector)
-    for i in range(num_ref_points):
-        time_at_step = (i + 1) * model_params['dt']
-        global_ref_path[i, :] = current_state[0:3] + direction_norm * 1.0 * time_at_step
-
-    # Simulation Loop
-    num_sim_steps = 100
+    # Main Simulation Loop
+    num_sim_steps = 150
     for step in range(num_sim_steps):
-        # Check if the user has closed the window
-        if p.getConnectionInfo()['isConnected'] == 0: break
         print(f"\n--- Simulation Step {step + 1}/{num_sim_steps} ---")
+
+        # Check if goal is reached
         if np.linalg.norm(current_state[0:3] - goal_position) < 0.2:
             print("Goal reached!")
             break
-        
-        # GENERATE REFERENCE
-        direction_vector_loop = goal_position - current_state[0:3]
-        direction_norm_loop = direction_vector_loop / np.linalg.norm(direction_vector_loop)
+
+        # Perceive
+        uav_pos = current_state[0:3]
+        visible_obstacles = perception.detect_obstacles(uav_pos, all_world_obstacles)
+        print(f"Visible obstacles: {len(visible_obstacles)}")
+
+        # GENERATE REFERENCE PATH
+        ref_planner.update_grid(visible_obstacles, mpc_params['safety_distance'] * 1.2) # Small buffer
+        global_ref_path = ref_planner.find_path(uav_pos, goal_position)
+
+        if global_ref_path is None:
+            print("Pathfinder failed. Falling back to straight line reference")
+            # If A* fails, just create a naive straight-line path to the goal
+            direction_vector_loop = goal_position - current_state[0:3]
+            direction_norm_loop = direction_vector_loop / np.linalg.norm(direction_vector_loop)
+            global_ref_path = np.zeros((mpc_params['P'], 3))
+            for i in range(mpc_params['P']):
+                time_at_step = (i + 1) * model_params['dt']
+                global_ref_path[i, :] = current_state[0:3] + direction_norm_loop * 1.0 * time_at_step
+
+        num_global_points = global_ref_path.shape[0]
         ref_path = np.zeros((mpc_params['P'], 3))
         for i in range(mpc_params['P']):
-            time_at_step = (i + 1) * model_params['dt']
-            ref_path[i, :] = current_state[0:3] + direction_norm_loop * cost_weights['ref_speed'] * time_at_step
+            # Find the closest point on the global path to where we expect to be
+            lookahead_dist = cost_weights['ref_speed'] * i * model_params['dt']
             
+            # Find the index in the global path that corresponds to this lookahead distance
+            target_index = int(lookahead_dist / 0.1) # Assuming path segments are ~0.1m
+            if target_index >= num_global_points:
+                target_index = num_global_points - 1
+            
+            ref_path[i, :] = global_ref_path[target_index, :]
+        
         # PLAN
-        optimized_trajectory = optimizer.solve(current_state, ref_path, obstacle_positions, cost_weights)
+        optimized_trajectory = optimizer.solve(current_state, ref_path, visible_obstacles, cost_weights)
         if optimized_trajectory is None:
-            print("Solver failed to find a solution. Halting.")
+            print("Solver failed to find a solution. Halting")
             break
-            
+        
         # ACT
         current_state = optimized_trajectory[1, :]
         path_history.append(current_state[0:3])
         
         # VISUALIZE
-        p.resetBasePositionAndOrientation(uav_id, current_state[0:3], p.getQuaternionFromEuler([0,0,0]))
-        p.addUserDebugLine(current_state[0:3], goal_position, [0,1,0], 2, lifeTime=0.2)
-        for i in range(mpc_params['P']):
-            p.addUserDebugLine(optimized_trajectory[i, 0:3], optimized_trajectory[i+1, 0:3], [0,0,1], 2, lifeTime=0.2)
+        visualizer.update(uav_pos=current_state[0:3],
+                          executed_path=path_history, 
+                          mpc_plan=optimized_trajectory[:, 0:3], 
+                          ref_path=global_ref_path)
         
-        time.sleep(model_params['dt'])
+        time.sleep(model_params['dt']) # Control the simulation speed
 
-    print("\nSimulation finished.")
-    p.disconnect()
-    
-    # Plot final results
-    plot_results(global_ref_path=global_ref_path, path_history=path_history, obstacles=obstacle_positions,
-                  mpc_params=mpc_params, goal_position=goal_position)
+    print("\nSimulation finished. Close the plot window to exit.")
+    plt.ioff()
+    plt.show()
 
 if __name__ == '__main__':
-    run_simulation()
+    run_simulation_matplotlib()

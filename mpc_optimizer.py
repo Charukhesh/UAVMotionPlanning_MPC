@@ -20,6 +20,24 @@ def get_uav_model(dt, D_max=np.diag([0.5, 0.5, 0.5])):
     
     return A, B
 
+class PerceptionModule:
+    """Simulates a local range sensor on the UAV."""
+    def __init__(self, sensor_range):
+        self.sensor_range = sensor_range
+        print(f"Perception module initialized with range: {self.sensor_range}m")
+
+    def detect_obstacles(self, uav_position, all_world_obstacles):
+        """
+        Returns a list of obstacles that are within the sensor's range.
+        """
+        visible_obstacles = []
+        for obs_pos in all_world_obstacles:
+            dist_to_obs = np.linalg.norm(uav_position - obs_pos)
+            if dist_to_obs <= self.sensor_range:
+                visible_obstacles.append(obs_pos)
+        
+        return visible_obstacles
+
 class MPCOptimizer:
     def __init__(self, model_params, mpc_params, cost_weights):
         self.A, self.B = get_uav_model(model_params['dt'], model_params['D_max'])
@@ -46,14 +64,14 @@ class MPCOptimizer:
         self.a_max = mpc_params['a_max']
         self.j_max = mpc_params['j_max']
 
-    def solve(self, current_state, ref_path, obstacles, cost_weights):
+    def solve(self, current_state, ref_path, visible_obstacles, cost_weights):
         """
         Solves the nonlinear optimization problem to find the optimal control sequence.
         """
         u_initial_guess = np.zeros(self.P * self.nu)
 
         # Objective function
-        obj_func = lambda u: self.objective_function(u, cost_weights, current_state, ref_path, obstacles)
+        obj_func = lambda u: self.objective_function(u, cost_weights, current_state, ref_path, visible_obstacles)
 
         # Bounds
         jerk_bounds = (-self.j_max, self.j_max)
