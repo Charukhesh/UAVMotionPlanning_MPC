@@ -86,10 +86,10 @@ def run_simulation_matplotlib():
     
     # Scenario Setup (Two Obstacles)
     current_state = np.array([0, 0, 1, 0, 0, 0, 0, 0, 0])
-    goal_position = np.array([10.0, 4, 1.0])
+    goal_position = np.array([4.5, 2.5, 1.0])
 
     # For plot
-    all_world_obstacles = [np.array([4.0, 1.5, 1.0]), np.array([8.0, 3.5, 1.0])]
+    all_world_obstacles = [np.array([2.0, 2.0, 1.0]), np.array([4.0, 1.5, 1.0])]
     
     path_history = [current_state[0:3]]
     
@@ -117,11 +117,11 @@ def run_simulation_matplotlib():
         visible_obstacles = perception.detect_obstacles(uav_pos, all_world_obstacles)
         print(f"Visible obstacles: {len(visible_obstacles)}")
 
-        # GENERATE REFERENCE PATH
+        # GENERATE GLOBAL REFERENCE
         ref_planner.update_grid(visible_obstacles, mpc_params['safety_distance'] * 1.2) # Small buffer
-        global_ref_path = ref_planner.find_path(uav_pos, goal_position)
+        astar_path = ref_planner.find_path(uav_pos, goal_position)
 
-        if global_ref_path is None:
+        if astar_path is None:
             print("Pathfinder failed. Falling back to straight line reference")
             # If A* fails, just create a naive straight-line path to the goal
             direction_vector_loop = goal_position - current_state[0:3]
@@ -129,16 +129,35 @@ def run_simulation_matplotlib():
             global_ref_path = np.zeros((mpc_params['P'], 3))
             for i in range(mpc_params['P']):
                 time_at_step = (i + 1) * model_params['dt']
-                global_ref_path[i, :] = current_state[0:3] + direction_norm_loop * 1.0 * time_at_step
+                global_ref_path[i, :] = current_state[0:3] + direction_norm_loop * cost_weights['ref_speed'] * time_at_step
+        else:
+            # Check if the A* path reached the goal
+            last_astar_point = astar_path[-1, :]
+            dist_to_goal = np.linalg.norm(last_astar_point - goal_position)
+
+            if dist_to_goal > 1.0: # If last point is more than 1m from goal
+                print("A* path is local. Stitching straight line to goal")
+                # Create a straight line segment from the end of A* to the goal
+                num_stitch_points = int(dist_to_goal / 0.1) # Assuming path segments are ~0.1m
+                if num_stitch_points < 2: num_stitch_points = 2
+
+                stitch_path = np.linspace(last_astar_point, goal_position, num_stitch_points)
+                global_ref_path = np.vstack([astar_path, stitch_path])
+            else:
+                global_ref_path = astar_path
+
 
         num_global_points = global_ref_path.shape[0]
         ref_path = np.zeros((mpc_params['P'], 3))
         for i in range(mpc_params['P']):
             # Find the closest point on the global path to where we expect to be
             lookahead_dist = cost_weights['ref_speed'] * i * model_params['dt']
+
+            path_distances = np.linalg.norm(np.diff(global_ref_path, axis=0), axis=1)
+            cumulative_dist = np.insert(np.cumsum(path_distances), 0, 0)
             
             # Find the index in the global path that corresponds to this lookahead distance
-            target_index = int(lookahead_dist / 0.1) # Assuming path segments are ~0.1m
+            target_index = np.searchsorted(cumulative_dist, lookahead_dist)
             if target_index >= num_global_points:
                 target_index = num_global_points - 1
             
