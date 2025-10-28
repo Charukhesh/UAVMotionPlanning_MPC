@@ -38,6 +38,30 @@ class PerceptionModule:
         
         return visible_obstacles
 
+class NoisyPerceptionModule:
+    """Simulates a sensor that reports obstacle positions with noise"""
+    def __init__(self, sensor_range, noise_std_dev):
+        self.sensor_range = sensor_range
+        self.noise_std_dev = noise_std_dev
+        print(f"Noisy perception enabled with noise_std_dev: {self.noise_std_dev}")
+
+    def detect_obstacles(self, uav_position, all_world_obstacles):
+        """
+        Returns a list of TUPLES: (mean_position, uncertainty_covariance)
+        for obstacles within sensor range
+        """
+        visible_obstacles_with_uncertainty = []
+        for obs_pos_true in all_world_obstacles:
+            dist_to_obs = np.linalg.norm(uav_position - obs_pos_true)
+            if dist_to_obs <= self.sensor_range:
+                noise = np.random.normal(0, self.noise_std_dev, 3)
+                obs_pos_measured = obs_pos_true + noise
+                covariance = np.eye(3) * (self.noise_std_dev**2)
+    
+                visible_obstacles_with_uncertainty.append( (obs_pos_measured, covariance) )
+        
+        return visible_obstacles_with_uncertainty
+
 class MPCOptimizer:
     def __init__(self, model_params, mpc_params, cost_weights):
         self.A, self.B = get_uav_model(model_params['dt'], model_params['D_max'])

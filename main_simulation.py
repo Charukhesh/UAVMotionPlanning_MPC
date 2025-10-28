@@ -86,10 +86,12 @@ def run_simulation_matplotlib():
     
     # Scenario Setup (Two Obstacles)
     current_state = np.array([0, 0, 1, 0, 0, 0, 0, 0, 0])
-    goal_position = np.array([4.5, 2.5, 1.0])
+    goal_position = np.array([10.0, 2.5, 1.0])
 
     # For plot
-    all_world_obstacles = [np.array([2.0, 2.0, 1.0]), np.array([4.0, 1.5, 1.0])]
+    all_world_obstacles = [np.array([2.0, 2.0, 1.0]), np.array([4.0, 0.3, 1.0]),
+                           np.array([6.0, 2.0, 1.0]), np.array([8.0, 1.5, 1.0]),
+                           np.array([5.0, 3.5, 1.0])]
     
     path_history = [current_state[0:3]]
     
@@ -103,7 +105,7 @@ def run_simulation_matplotlib():
                                     sensor_range=sensor_range)
 
     # Main Simulation Loop
-    num_sim_steps = 150
+    num_sim_steps = 500
     for step in range(num_sim_steps):
         print(f"\n--- Simulation Step {step + 1}/{num_sim_steps} ---")
 
@@ -117,7 +119,7 @@ def run_simulation_matplotlib():
         visible_obstacles = perception.detect_obstacles(uav_pos, all_world_obstacles)
         print(f"Visible obstacles: {len(visible_obstacles)}")
 
-        # GENERATE GLOBAL REFERENCE
+        # Generate global reference path using A*
         ref_planner.update_grid(visible_obstacles, mpc_params['safety_distance'] * 1.2) # Small buffer
         astar_path = ref_planner.find_path(uav_pos, goal_position)
 
@@ -136,7 +138,6 @@ def run_simulation_matplotlib():
             dist_to_goal = np.linalg.norm(last_astar_point - goal_position)
 
             if dist_to_goal > 1.0: # If last point is more than 1m from goal
-                print("A* path is local. Stitching straight line to goal")
                 # Create a straight line segment from the end of A* to the goal
                 num_stitch_points = int(dist_to_goal / 0.1) # Assuming path segments are ~0.1m
                 if num_stitch_points < 2: num_stitch_points = 2
