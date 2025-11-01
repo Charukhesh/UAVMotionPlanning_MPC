@@ -5,6 +5,7 @@ import numpy as np
 import time
 from mpc_optimizer import MPCOptimizer, PerceptionModule  
 from reference_planner import ReferencePlanner
+from record_sim import VideoRecorder
 
 class RealTimeVisualizer:
     def __init__(self, x_lim, y_lim, goal_position, all_world_obstacles, mpc_params, sensor_range):
@@ -103,6 +104,8 @@ def run_simulation_matplotlib():
                                     all_world_obstacles=all_world_obstacles,
                                     mpc_params=mpc_params,
                                     sensor_range=sensor_range)
+    vid_path = "./output/baseline_sim.mp4"
+    video_recorder = VideoRecorder(fig=visualizer.fig, filename=vid_path, fps=15)
 
     # Main Simulation Loop
     num_sim_steps = 500
@@ -179,10 +182,12 @@ def run_simulation_matplotlib():
                           executed_path=path_history, 
                           mpc_plan=optimized_trajectory[:, 0:3], 
                           ref_path=global_ref_path)
-        
+        video_recorder.capture_frame()
         time.sleep(model_params['dt']) # Control the simulation speed
 
-    print("\nSimulation finished. Close the plot window to exit.")
+    print("\nSimulation finished. Saving video...")
+    video_recorder.save_video()
+    
     plt.ioff()
     plt.show()
 

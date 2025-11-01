@@ -6,6 +6,7 @@ from matplotlib.patches import Circle as LegendCircle
 from mpc_optimizer import MPCOptimizer, PerceptionModule, NoisyPerceptionModule
 from reference_planner import ReferencePlanner
 from risk_aware_optimizer import RiskAwareMPCOptimizer
+from record_sim import VideoRecorder
 import time
 
 class ComparisonVisualizer:
@@ -96,110 +97,91 @@ def race_simulation():
         noisy_safety=baseline_mpc_params['safety_distance'],
         safety=risk_aware_mpc_params['safety_distance']
     )
+    vid_path = "./output/risk_aware_race.mp4"
+    video_recorder = VideoRecorder(fig=visualizer.fig, filename=vid_path, fps=15)
+
+    def planning_pipeline(current_state, safety_margin):
+        uav_pos = current_state[0:3]
+        
+        ref_planner.update_grid(all_world_obstacles, safety_margin)
+        astar_path = ref_planner.find_path(uav_pos, goal_position)
+        
+        # Path stitching
+        if astar_path is None:
+            direction_vector_loop = goal_position - uav_pos
+            direction_norm_loop = direction_vector_loop / np.linalg.norm(direction_vector_loop)
+            global_ref_path = np.zeros((baseline_mpc_params['P'], 3))
+            for i in range(baseline_mpc_params['P']):
+                time_at_step = (i + 1) * model_params['dt']
+                global_ref_path[i, :] = uav_pos + direction_norm_loop * cost_weights['ref_speed'] * time_at_step
+        else:
+            last_astar_point = astar_path[-1, :]; dist_to_goal = np.linalg.norm(last_astar_point - goal_position)
+            if dist_to_goal > 1.0:
+                num_stitch = int(dist_to_goal / 0.1); num_stitch = max(2, num_stitch)
+                stitch_path = np.linspace(last_astar_point, goal_position, num_stitch)
+                global_ref_path = np.vstack([astar_path, stitch_path])
+            else: global_ref_path = astar_path
+        
+        # Reference path generation
+        num_global = global_ref_path.shape[0]
+        ref_path = np.zeros((baseline_mpc_params['P'], 3))
+
+        path_distances = np.linalg.norm(np.diff(global_ref_path, axis=0), axis=1)
+        cumulative_dist = np.insert(np.cumsum(path_distances), 0, 0)
+        for i in range(baseline_mpc_params['P']):
+            lookahead_dist = 1.0 * (i + 1) * model_params['dt']
+            target_index = np.searchsorted(cumulative_dist, lookahead_dist); target_index = min(target_index, num_global-1)
+            ref_path[i, :] = global_ref_path[target_index, :]
+        
+        return ref_path
     
     # Main Simulation Loop
-    num_sim_steps = 350
-    uav_pos = baseline_state[0:3]
+    num_sim_steps = 150
     for step in range(num_sim_steps):
         current_time = step * model_params['dt']
         print(f"\n--- Step {step+1}/{num_sim_steps} ---")
 
-        if not baseline_finished:
+        if np.linalg.norm(baseline_state[0:3] - goal_position) > 0.5:
             print("  - Planning for Baseline (Timid)...")
-            base_uav_pos = baseline_state[0:3]
-            
-            visible_obstacles_noisy = noisy_perception.detect_obstacles(base_uav_pos, all_world_obstacles)
+            # Perception
+            visible_obstacles_noisy = noisy_perception.detect_obstacles(baseline_state[0:3], all_world_obstacles)
             visible_obstacle_means = [obs[0] for obs in visible_obstacles_noisy]
-
-            ref_planner.update_grid(visible_obstacle_means, baseline_mpc_params['safety_distance'])
-            astar_path = ref_planner.find_path(base_uav_pos, goal_position)
-            
-            if astar_path is None:
-                direction_vector_loop = goal_position - uav_pos
-                direction_norm_loop = direction_vector_loop / np.linalg.norm(direction_vector_loop)
-                global_ref_path = np.zeros((baseline_mpc_params['P'], 3))
-                for i in range(baseline_mpc_params['P']):
-                    time_at_step = (i + 1) * model_params['dt']
-                    global_ref_path[i, :] = uav_pos + direction_norm_loop * cost_weights['ref_speed'] * time_at_step
-            else:
-                last_astar_point = astar_path[-1, :]; dist_to_goal = np.linalg.norm(last_astar_point - goal_position)
-                if dist_to_goal > 1.0:
-                    num_stitch = int(dist_to_goal / 0.1); num_stitch = max(2, num_stitch)
-                    stitch_path = np.linspace(last_astar_point, goal_position, num_stitch)
-                    global_ref_path = np.vstack([astar_path, stitch_path])
-                else: global_ref_path = astar_path
-
-            num_global = global_ref_path.shape[0]
-            ref_path = np.zeros((baseline_mpc_params['P'], 3))
-
-            path_distances = np.linalg.norm(np.diff(global_ref_path, axis=0), axis=1)
-            cumulative_dist = np.insert(np.cumsum(path_distances), 0, 0)
-            for i in range(baseline_mpc_params['P']):
-                lookahead_dist = 1.0 * (i + 1) * model_params['dt']
-                target_index = np.searchsorted(cumulative_dist, lookahead_dist); target_index = min(target_index, num_global-1)
-                ref_path[i, :] = global_ref_path[target_index, :]
-
-            baseline_plan = baseline_optimizer.solve(baseline_state, ref_path, visible_obstacle_means, cost_weights)
+            # Planning
+            baseline_ref_path = planning_pipeline(baseline_state, baseline_mpc_params['safety_distance'])
+            baseline_plan = baseline_optimizer.solve(baseline_state, baseline_ref_path, visible_obstacle_means, cost_weights)
+            # Acting
             if baseline_plan is not None:
                 baseline_state = baseline_plan[1, :]
             baseline_history.append(baseline_state[0:3])
+        else:
+            baseline_time = current_time
+            print(f"*** Baseline drone finished at {baseline_time:.2f}s ***")
         
-        if not riskaware_finished:
+        if np.linalg.norm(riskaware_state[0:3] - goal_position) > 0.5:
             print("  - Planning for Risk-Aware...")
-            risk_uav_pos = riskaware_state[0:3]
-            
-            visible_obstacles_noisy = noisy_perception.detect_obstacles(risk_uav_pos, all_world_obstacles)
-            visible_obstacle_means = [obs[0] for obs in visible_obstacles_noisy] # extract means for A*
-
-            ref_planner.update_grid(visible_obstacle_means, risk_aware_mpc_params['safety_distance'])
-            astar_path = ref_planner.find_path(risk_uav_pos, goal_position)
-
-            if astar_path is None:
-                direction_vector_loop = goal_position - uav_pos
-                direction_norm_loop = direction_vector_loop / np.linalg.norm(direction_vector_loop)
-                global_ref_path = np.zeros((baseline_mpc_params['P'], 3))
-                for i in range(baseline_mpc_params['P']):
-                    time_at_step = (i + 1) * model_params['dt']
-                    global_ref_path[i, :] = uav_pos + direction_norm_loop * cost_weights['ref_speed'] * time_at_step
-            else:
-                last_astar_point = astar_path[-1, :]; dist_to_goal = np.linalg.norm(last_astar_point - goal_position)
-                if dist_to_goal > 1.0:
-                    num_stitch = int(dist_to_goal / 0.1); num_stitch = max(2, num_stitch)
-                    stitch_path = np.linspace(last_astar_point, goal_position, num_stitch)
-                    global_ref_path = np.vstack([astar_path, stitch_path])
-                else: global_ref_path = astar_path
-
-            num_global = global_ref_path.shape[0]
-            ref_path = np.zeros((baseline_mpc_params['P'], 3))
-
-            path_distances = np.linalg.norm(np.diff(global_ref_path, axis=0), axis=1)
-            cumulative_dist = np.insert(np.cumsum(path_distances), 0, 0)
-            for i in range(baseline_mpc_params['P']):
-                lookahead_dist = 1.0 * (i + 1) * model_params['dt']
-                target_index = np.searchsorted(cumulative_dist, lookahead_dist); target_index = min(target_index, num_global-1)
-                ref_path[i, :] = global_ref_path[target_index, :]
-
-            riskaware_plan = riskaware_optimizer.solve(riskaware_state, ref_path, visible_obstacles_noisy, cost_weights)
+            # Perception
+            visible_obstacles_noisy = noisy_perception.detect_obstacles(riskaware_state[0:3], all_world_obstacles)
+            # Planning
+            riskaware_ref_path = planning_pipeline(riskaware_state, risk_aware_mpc_params['safety_distance'])
+            riskaware_plan = riskaware_optimizer.solve(riskaware_state, riskaware_ref_path, visible_obstacles_noisy, cost_weights)
+            # Acting
             if riskaware_plan is not None:
                 riskaware_state = riskaware_plan[1, :]
             riskaware_history.append(riskaware_state[0:3])
-        
-        visualizer.update(baseline_history, riskaware_history, riskaware_plan[:, 0:3] if riskaware_plan is not None else np.array([]))
-        time.sleep(model_params['dt'])
-
-        print(baseline_finished)
-        if not baseline_finished and np.linalg.norm(baseline_state[0:3] - goal_position) < 0.4:
-            baseline_finished = True
-            baseline_time = current_time
-            print(f"*** Baseline drone finished at {baseline_time:.2f}s ***")
-        print(riskaware_finished)
-        if not riskaware_finished and np.linalg.norm(riskaware_state[0:3] - goal_position) < 0.4:
-            riskaware_finished = True
+        else:
             riskaware_time = current_time
             print(f"*** Risk-Aware drone finished at {riskaware_time:.2f}s ***")
+        
+        visualizer.update(baseline_history, riskaware_history, riskaware_plan[:, 0:3] if riskaware_plan is not None else np.array([]))
+        video_recorder.capture_frame()
+        time.sleep(model_params['dt'])
 
-        if baseline_finished and riskaware_finished:
-            break
+        if np.linalg.norm(riskaware_state[0:3] - goal_position) < 0.5 :
+            if np.linalg.norm(baseline_state[0:3] - goal_position) < 0.5:
+                break
+
+    print("\nSimulation finished. Saving video...")
+    video_recorder.save_video()
 
     print("\n" + "="*50)
     print("---           RACE RESULTS           ---")
