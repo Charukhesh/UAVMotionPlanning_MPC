@@ -40,10 +40,10 @@ class PerceptionModule:
 
 class NoisyPerceptionModule:
     """Simulates a sensor that reports obstacle positions with noise"""
-    def __init__(self, sensor_range, noise_std_dev):
+    def __init__(self, sensor_range, noise_std_dev_lateral, noise_std_dev_depth):
         self.sensor_range = sensor_range
-        self.noise_std_dev = noise_std_dev
-        print(f"Noisy perception enabled with noise_std_dev: {self.noise_std_dev}")
+        self.std_lat = noise_std_dev_lateral
+        self.std_dep = noise_std_dev_depth
 
     def detect_obstacles(self, uav_position, all_world_obstacles):
         """
@@ -54,10 +54,13 @@ class NoisyPerceptionModule:
         for obs_pos_true in all_world_obstacles:
             dist_to_obs = np.linalg.norm(uav_position - obs_pos_true)
             if dist_to_obs <= self.sensor_range:
-                noise = np.random.normal(0, self.noise_std_dev, 3)
+                noise = np.array([
+                    np.random.normal(0, self.std_lat),
+                    np.random.normal(0, self.std_dep),
+                    0])
                 obs_pos_measured = obs_pos_true + noise
-                covariance = np.eye(3) * (self.noise_std_dev**2)
-    
+                covariance = np.diag([self.std_lat**2, self.std_dep**2, 1e-9])
+
                 visible_obstacles_with_uncertainty.append( (obs_pos_measured, covariance) )
         
         return visible_obstacles_with_uncertainty

@@ -1,58 +1,73 @@
 import numpy as np
 import matplotlib.pyplot as plt
-from matplotlib.lines import Line2D
-from matplotlib.patches import Circle as LegendCircle
+from matplotlib.patches import Patch
+from scipy.stats import norm
 
-from mpc_optimizer import MPCOptimizer, PerceptionModule, NoisyPerceptionModule
+from mpc_optimizer import MPCOptimizer, NoisyPerceptionModule
 from reference_planner import ReferencePlanner
 from risk_aware_optimizer import RiskAwareMPCOptimizer
 from record_sim import VideoRecorder
 import time
 
 class ComparisonVisualizer:
-    """A class to handle real-time plotting of TWO drones simultaneously"""
-    def __init__(self, x_lim, y_lim, goal_position, all_world_obstacles, noisy_safety, safety):
+    """A class to handle real-time plotting with a DYNAMIC safety radius"""
+    def __init__(self, x_lim, y_lim, goal_position, all_world_obstacles, baseline_safety_radius, risk_aware_params):
         plt.ion()
         self.fig, self.ax = plt.subplots(figsize=(12, 9))
+        self.ax.set_aspect('equal', adjustable='box')
         
-        goal_handle = self.ax.plot(goal_position[0], goal_position[1], 'g*', markersize=20)
-        obstacle_handles = []
+        self.risk_aware_base_radius = risk_aware_params['safety_distance']
+        self.z_score = norm.ppf(1 - risk_aware_params['max_risk'])
+        
+        self.ax.plot(goal_position[0], goal_position[1], 'g*', markersize=20, label='Goal')
+        
         for obs in all_world_obstacles:
-            circle1 = plt.Circle((obs[0], obs[1]), noisy_safety, color='r', alpha=0.3)
-            circle2 = plt.Circle((obs[0], obs[1]), safety, color='y', alpha=0.3)
-            self.ax.add_artist(circle1)
-            self.ax.add_artist(circle2)
-            obs_handle = self.ax.plot(obs[0], obs[1], 'rx', markersize=15)
-            obstacle_handles.append(obs_handle)
+            circle = plt.Circle((obs[0], obs[1]), baseline_safety_radius, color='r', alpha=0.15)
+            self.ax.add_artist(circle)
+            self.ax.plot(obs[0], obs[1], 'rx', markersize=15, label='Obstacle' if 'Obstacle' not in self.ax.get_legend_handles_labels()[1] else "")
 
-        self.baseline_path_plot, = self.ax.plot([], [], 'r-o', markersize=4)
-        self.riskaware_path_plot, = self.ax.plot([], [], 'b-o', markersize=4)
-        self.mpc_plan_plot, = self.ax.plot([], [], 'm--')
-
-        safety_radius_noisy = LegendCircle((0,0), radius=0.1, color='r', alpha=0.3)
-        safety_radius = LegendCircle((0,0), radius=0.1, color='y', alpha=0.3)
-
-        legend_handles = [goal_handle, obstacle_handles[0], self.baseline_path_plot,
-                          self.riskaware_path_plot, self.mpc_plan_plot, safety_radius_noisy, safety_radius]
+        self.baseline_path_plot, = self.ax.plot([], [], 'r-o', markersize=4, label='Baseline Path')
+        self.riskaware_path_plot, = self.ax.plot([], [], 'b-o', markersize=4, label='RiskAware Path')
+        self.mpc_plan_plot, = self.ax.plot([], [], 'm--', label='RiskAware MPC Plan')
         
-        legend_labels = ['Goal', 'Obstacle', 'Baseline Path', 'RiskAware Path', 'RiskAware MPC Plan',
-                        'Safety Radius Noisy', 'Risk Aware Safety Radius']
-        
-        self.ax.legend(handles=legend_handles, labels=legend_labels)
+        self.dynamic_circles = []
+
+        baseline_safety_proxy = Patch(facecolor='red', alpha=0.15, label='Baseline Fixed Margin')
+        riskaware_safety_proxy = Patch(facecolor='blue', alpha=0.3, label='RiskAware Dynamic Margin')
+
+        handles, labels = self.ax.get_legend_handles_labels()
+        handles.extend([baseline_safety_proxy, riskaware_safety_proxy])
+        self.ax.legend(handles=handles, loc='upper left')
 
         self.ax.set_title("Comparison: Baseline vs. Risk Aware MPC", fontsize=16)
         self.ax.set_xlabel("X position (m)"); self.ax.set_ylabel("Y position (m)")
         self.ax.set_xlim(x_lim); self.ax.set_ylim(y_lim)
-        self.ax.grid(True); self.ax.set_aspect('equal', adjustable='box')
+        self.ax.grid(True)
 
-    def update(self, baseline_history, riskaware_history, riskaware_plan):
-        baseline_path = np.array(baseline_history)
-        riskaware_path = np.array(riskaware_history)
-        
-        self.baseline_path_plot.set_data(baseline_path[:, 0], baseline_path[:, 1])
-        self.riskaware_path_plot.set_data(riskaware_path[:, 0], riskaware_path[:, 1])
+    def update(self, baseline_history, riskaware_history, riskaware_plan, riskaware_pos, visible_obstacles_noisy):
+        self.baseline_path_plot.set_data(np.array(baseline_history)[:, 0], np.array(baseline_history)[:, 1])
+        self.riskaware_path_plot.set_data(np.array(riskaware_history)[:, 0], np.array(riskaware_history)[:, 1])
         self.mpc_plan_plot.set_data(riskaware_plan[:, 0], riskaware_plan[:, 1])
         
+        for circle in self.dynamic_circles:
+            circle.remove()
+        self.dynamic_circles.clear()
+
+        for obs_mean, obs_cov in visible_obstacles_noisy:
+            vec_to_obs = obs_mean - riskaware_pos
+            dist_to_obs = np.linalg.norm(vec_to_obs)
+            if dist_to_obs < 1e-6: continue
+            
+            direction_vec = vec_to_obs / dist_to_obs
+            projected_variance = direction_vec.T @ obs_cov @ direction_vec
+            projected_std_dev = np.sqrt(projected_variance)
+            
+            required_margin = self.risk_aware_base_radius + self.z_score * projected_std_dev
+            
+            dynamic_circle = plt.Circle((obs_mean[0], obs_mean[1]), required_margin, color='b', alpha=0.3)
+            self.ax.add_artist(dynamic_circle)
+            self.dynamic_circles.append(dynamic_circle)
+
         self.fig.canvas.draw()
         plt.pause(0.01)
 
@@ -62,23 +77,32 @@ def race_simulation():
     model_params = {'dt': 0.1, 'D_max': np.diag([0.5, 0.5, 0.5])}
     cost_weights = { 'wt': 5.0, 'ws': 1.0, 'wc': 10000.0, 'wj': 1.0, 'alpha': 50.0, 'ref_speed': 1.0 }
 
-    noise_std_dev = 0.15
-    baseline_mpc_params = { 'P': 20, 'v_max': 2.0, 'a_max': 9.81, 'j_max': 1.0, 'safety_distance': 0.6 + 1.5 * noise_std_dev}
-    risk_aware_mpc_params = {'P': 20, 'v_max': 2.0, 'a_max': 9.81, 'j_max': 1.0, 'safety_distance': 0.6, 'max_risk': 0.01 }
+    noise_std_dev_lateral = 0.05
+    noise_std_dev_depth = 0.2 # 0.30
+    baseline_safety_margin = 0.6 + 2.5 * noise_std_dev_depth 
+    riskaware_safety_margin = 0.6
+    baseline_mpc_params = { 'P': 20, 'v_max': 2.0, 'a_max': 9.81, 'j_max': 1.0, 'safety_distance': baseline_safety_margin}
+    risk_aware_mpc_params = {'P': 20, 'v_max': 2.0, 'a_max': 9.81, 'j_max': 1.0, 'safety_distance': riskaware_safety_margin, 'max_risk': 0.01 }
     
     baseline_optimizer = MPCOptimizer(model_params, baseline_mpc_params, cost_weights)
     riskaware_optimizer = RiskAwareMPCOptimizer(model_params, risk_aware_mpc_params, cost_weights)
 
-    sensor_range = 2.0
     goal_position = np.array([10.0, 2.5, 1.0])
     all_world_obstacles = [
         np.array([2.0, 2.0, 1.0]), np.array([4.0, 0.3, 1.0]),
         np.array([6.0, 1.8, 1.0]), np.array([8.0, 1.5, 1.0]),
         np.array([5.0, 3.5, 1.0])
     ]
+    #all_world_obstacles = []
+    #for x_pos in np.arange(2.0, 9.0, 2):
+    #    all_world_obstacles.append(np.array([x_pos, 1.25, 1.0]))  # Top wall
+    #    all_world_obstacles.append(np.array([x_pos, -1.25, 1.0])) # Bottom wall
+
     grid_params = {'width': 120, 'height': 60, 'resolution': 0.1, 'origin_x': -1.0, 'origin_y': -2.0}
     
-    noisy_perception = NoisyPerceptionModule(sensor_range=sensor_range, noise_std_dev=noise_std_dev)
+    sensor_range = 2.0
+    noisy_perception = NoisyPerceptionModule(sensor_range=sensor_range, noise_std_dev_lateral=noise_std_dev_lateral,
+                                             noise_std_dev_depth=noise_std_dev_depth)
     ref_planner = ReferencePlanner(grid_params)
 
     baseline_state = np.array([0, 0, 1, 0, 0, 0, 0, 0, 0])
@@ -88,16 +112,18 @@ def race_simulation():
 
     baseline_time = float('inf')
     riskaware_time = float('inf')
+    baseline_control_history = []
+    riskaware_control_history = []
     baseline_finished = False
     riskaware_finished = False
-
+    
     visualizer = ComparisonVisualizer(
         x_lim=[-1, 11], y_lim=[-1, 5],
         goal_position=goal_position, all_world_obstacles=all_world_obstacles,
-        noisy_safety=baseline_mpc_params['safety_distance'],
-        safety=risk_aware_mpc_params['safety_distance']
+        baseline_safety_radius=baseline_mpc_params['safety_distance'],
+        risk_aware_params=risk_aware_mpc_params
     )
-    vid_path = "./output/risk_aware_race.mp4"
+    vid_path = "./output/baseline_comparison.mp4"
     video_recorder = VideoRecorder(fig=visualizer.fig, filename=vid_path, fps=15)
 
     def planning_pipeline(current_state, safety_margin):
@@ -140,8 +166,10 @@ def race_simulation():
     for step in range(num_sim_steps):
         current_time = step * model_params['dt']
         print(f"\n--- Step {step+1}/{num_sim_steps} ---")
+        print(np.linalg.norm(baseline_state[0:2] - goal_position[0:2]))
+        print(np.linalg.norm(riskaware_state[0:2] - goal_position[0:2]))
 
-        if np.linalg.norm(baseline_state[0:3] - goal_position) > 0.5:
+        if not baseline_finished:
             print("  - Planning for Baseline (Timid)...")
             # Perception
             visible_obstacles_noisy = noisy_perception.detect_obstacles(baseline_state[0:3], all_world_obstacles)
@@ -149,51 +177,87 @@ def race_simulation():
             # Planning
             baseline_ref_path = planning_pipeline(baseline_state, baseline_mpc_params['safety_distance'])
             baseline_plan = baseline_optimizer.solve(baseline_state, baseline_ref_path, visible_obstacle_means, cost_weights)
+            baseline_effort = (baseline_plan[1, 6:9] - baseline_plan[0, 6:9]) / model_params['dt']
+            baseline_control_history.append(baseline_effort)
             # Acting
             if baseline_plan is not None:
                 baseline_state = baseline_plan[1, :]
-            baseline_history.append(baseline_state[0:3])
-        else:
-            baseline_time = current_time
-            print(f"*** Baseline drone finished at {baseline_time:.2f}s ***")
-        
-        if np.linalg.norm(riskaware_state[0:3] - goal_position) > 0.5:
+            
+            if np.linalg.norm(baseline_state[0:2] - goal_position[0:2]) < 0.2:
+                baseline_finished = True
+                baseline_time = current_time
+                print(f"*** Baseline drone finished at {baseline_time:.2f}s ***")
+
+        baseline_history.append(baseline_state[0:3])
+
+        if not riskaware_finished:
             print("  - Planning for Risk-Aware...")
             # Perception
-            visible_obstacles_noisy = noisy_perception.detect_obstacles(riskaware_state[0:3], all_world_obstacles)
+            visible_obstacles_noisy_risk = noisy_perception.detect_obstacles(riskaware_state[0:3], all_world_obstacles)
             # Planning
             riskaware_ref_path = planning_pipeline(riskaware_state, risk_aware_mpc_params['safety_distance'])
-            riskaware_plan = riskaware_optimizer.solve(riskaware_state, riskaware_ref_path, visible_obstacles_noisy, cost_weights)
+            riskaware_plan = riskaware_optimizer.solve(riskaware_state, riskaware_ref_path, visible_obstacles_noisy_risk, cost_weights)
+            riskaware_effort = (riskaware_plan[1, 6:9] - riskaware_plan[0, 6:9]) / model_params['dt']
+            riskaware_control_history.append(riskaware_effort)
             # Acting
             if riskaware_plan is not None:
                 riskaware_state = riskaware_plan[1, :]
-            riskaware_history.append(riskaware_state[0:3])
-        else:
-            riskaware_time = current_time
-            print(f"*** Risk-Aware drone finished at {riskaware_time:.2f}s ***")
-        
-        visualizer.update(baseline_history, riskaware_history, riskaware_plan[:, 0:3] if riskaware_plan is not None else np.array([]))
+
+            if np.linalg.norm(riskaware_state[0:2] - goal_position[0:2]) < 0.2:
+                riskaware_finished = True
+                riskaware_time = current_time
+                print(f"*** Risk-Aware drone finished at {riskaware_time:.2f}s ***")
+
+        riskaware_history.append(riskaware_state[0:3])
+
+        if 'riskaware_plan' not in locals() or riskaware_plan is None:
+            riskaware_plan = np.array([riskaware_state[0:3]] * risk_aware_mpc_params['P'])
+
+        visualizer.update(baseline_history, riskaware_history, riskaware_plan[:, 0:3],
+                          riskaware_state[0:3], visible_obstacles_noisy_risk if 'visible_obstacles_noisy_risk' in locals() else [])
         video_recorder.capture_frame()
         time.sleep(model_params['dt'])
 
-        if np.linalg.norm(riskaware_state[0:3] - goal_position) < 0.5 :
-            if np.linalg.norm(baseline_state[0:3] - goal_position) < 0.5:
-                break
+        if baseline_finished and riskaware_finished:
+            print("\nBoth drones have reached the goal")
+            break
 
     print("\nSimulation finished. Saving video...")
     video_recorder.save_video()
 
+    baseline_path_history = np.array(baseline_history)
+    baseline_control_history = np.array(baseline_control_history)
+    riskaware_path_history = np.array(riskaware_history)
+    riskaware_control_history = np.array(riskaware_control_history)
+
+    baseline_path_segments = np.linalg.norm(np.diff(baseline_path_history, axis=0), axis=1)
+    baseline_length = np.sum(baseline_path_segments)
+    riskaware_path_segments = np.linalg.norm(np.diff(riskaware_path_history, axis=0), axis=1)
+    riskaware_length = np.sum(riskaware_path_segments)
+
+    baseline_control_effort = np.sum(np.linalg.norm(baseline_control_history, axis=1)**2)
+    riskaware_control_effort = np.sum(np.linalg.norm(riskaware_control_history, axis=1)**2)
+
     print("\n" + "="*50)
     print("---           RACE RESULTS           ---")
     print("="*50)
-    print(f"| Method        | Finish Time (s) |")
-    print("|---------------|-----------------|")
-    print(f"| Baseline      | {baseline_time:<15.2f} |")
-    print(f"| Risk-Aware    | {riskaware_time:<15.2f} |")
+    print(f"| Method        | Finish Time (s) | Path Length (m) | Control Effort")
+    print("|---------------|-----------------|-----------------|-----------------|")
+    print(f"| Baseline      | {baseline_time:<15.4f} |{baseline_length:<15.4f} |{baseline_control_effort:<15.4f} |")
+    print(f"| Risk-Aware    | {riskaware_time:<15.4f} |{riskaware_length:<15.4f} |{riskaware_control_effort:<15.4f} |")
     print("="*50)
+
     if riskaware_time < baseline_time:
         improvement = (baseline_time - riskaware_time) / baseline_time * 100
-        print(f"Performance Improvement with Risk-Aware MPC: {improvement:.2f}%")
+        print(f"Performance improvement in time: {improvement:.2f}%")
+
+    if riskaware_length < baseline_length:
+        improvement = (baseline_length - riskaware_length) / baseline_length * 100
+        print(f"Performance improvement in path length: {improvement:.2f}%")
+
+    if riskaware_control_effort < baseline_control_effort:
+        improvement = (baseline_control_effort - riskaware_control_effort) / baseline_control_effort * 100
+        print(f"Performance improvement in control effort: {improvement:.2f}%")
 
     plt.ioff()
     plt.show()
