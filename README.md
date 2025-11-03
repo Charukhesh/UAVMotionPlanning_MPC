@@ -23,9 +23,6 @@ The primary goal of this project was to replicate and analyze the motion plannin
 
 After a successful replication, we identified a key limitation in handling sensor noise and proposed a novel **Risk-Aware MPC** extension. This extension replaces the paper's deterministic safety constraints with a probabilistic, chance-constrained approach, leading to a planner that is both more efficient and more robust in realistic conditions.
 
-![Final Comparison Plot](output/corridor_race.mp4)
-*(Example output: A comparative simulation showing our Risk-Aware planner (blue) finding a more efficient path than the baseline (red).)*
-
 ## The Core Problem
 
 Navigating a UAV in a cluttered, unknown environment requires solving a complex problem at every time step: "Given what I can see right now, what is the best sequence of actions to get me closer to my goal without crashing, while respecting my physical limits?"
@@ -55,6 +52,10 @@ This is the core of the system. The Model Predictive Controller takes the jagged
 
 This optimization is solved at every time step to produce a smooth, safe, and flyable local plan. The drone executes the first step of this plan, and the entire process repeats.
 
+<p align="center">
+  <img src="output/baseline_sim.gif" alt="Baseline" width="60%">
+</p>
+
 ## Novel Extension: Risk-Aware MPC
 
 ### The Limitation of the Baseline
@@ -68,6 +69,10 @@ Our extension replaces this fixed margin with an intelligent, **dynamic safety m
 
 ### Demonstrated Results
 In a simulated "corridor" race with anisotropic sensor noise, our Risk-Aware MPC demonstrated a **~12% improvement in finish time** and a **~20% reduction in control effort** compared to the conservatively tuned baseline. This proves that by explicitly reasoning about uncertainty, our method achieves superior performance and efficiency.
+
+<p align="center">
+  <img src="output/corridor_race.gif" alt="Risk-Aware MPC" width="60%">
+</p>
 
 ## File Structure
 
