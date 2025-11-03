@@ -1,0 +1,6 @@
+numpy
+scipy
+matplotlib
+pathfinding
+imageio
+imageio-ffmpeg
